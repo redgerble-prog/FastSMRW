@@ -27,7 +27,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import me.masonasons.fastsm.ui.CoreViewModel
 import me.masonasons.fastsm.ui.ProfileEditorDialog
 import me.masonasons.fastsm.ui.compose.ComposeScreen
@@ -104,10 +107,21 @@ private fun App(vm: CoreViewModel) {
 
     val view = LocalView.current
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     // Speak the core's announcements ("Signing in…", errors, …) through TalkBack.
-    LaunchedEffect(vm) {
-        vm.announcements.collect { msg -> view.announceForAccessibility(msg) }
+    // Collection is scoped to RESUMED and stops the instant the activity leaves
+    // the foreground (repeatOnLifecycle cancels/restarts the block), so a late
+    // "announce" event fired while the app is closing can't reach a window
+    // that's already being torn down — that's what was wedging TalkBack's TTS.
+    // The isAttachedToWindow check is a second belt-and-braces guard against
+    // any announcement that's still in flight at the instant the window goes.
+    LaunchedEffect(vm, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            vm.announcements.collect { msg ->
+                if (view.isAttachedToWindow) view.announceForAccessibility(msg)
+            }
+        }
     }
     // Mastodon OAuth: the core hands us the authorize URL to open in a browser.
     LaunchedEffect(vm) {
@@ -198,4 +212,5 @@ private fun App(vm: CoreViewModel) {
             dismissButton = { TextButton(onClick = { vm.dismissUpdate() }) { Text("Later") } },
         )
     }
-}
+}    
+        
