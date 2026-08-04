@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,14 +49,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.material3.AlertDialog
@@ -103,6 +111,9 @@ fun HomeScreen(
 
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
+    // True exactly once per fresh HomeScreen composition (i.e. once per app
+    // open, not on every tab switch or recomposition) — see StatusList.
+    var pendingTopFocus by remember { mutableStateOf(true) }
     // The User Analysis picker (opened from the overflow menu).
     var showUserAnalysis by remember { mutableStateOf(false) }
     // Find in timeline (opened from the overflow menu).
@@ -238,7 +249,14 @@ fun HomeScreen(
             // tab strip renders under the gesture/button nav bar and becomes
             // untouchable and unreachable to TalkBack.
             if (tabsAtBottom) {
-                Box(Modifier.windowInsetsPadding(WindowInsets.navigationBars)) { tabBar() }
+                Box(
+                    Modifier
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .zIndex(1f)
+                        // Own traversal group so TalkBack always reaches every tab here,
+                        // regardless of the FAB's overlapping bottom-end position.
+                        .semantics(mergeDescendants = false) { isTraversalGroup = true },
+                ) { tabBar() }
             }
         },
         floatingActionButton = {
@@ -264,6 +282,8 @@ fun HomeScreen(
                     ?.let { "$selected/${it.kind}/${it.title}" } ?: "$pageIndex",
                 scrollRequest = scrollRequest?.takeIf { it.tab == pageIndex },
                 actionOrder = postActionOrder,
+                focusTopOnAppear = pendingTopFocus && pageIndex == pagerState.currentPage,
+                onTopFocusHandled = { pendingTopFocus = false },
                 onOpenLink = viewModel::openLink,
                 onLoadOlder = { viewModel.loadOlder(automatic = true) },
                 onNoteSelection = viewModel::noteSelection,
@@ -591,6 +611,11 @@ private fun StatusList(
     timelineKey: String,
     scrollRequest: CoreViewModel.ScrollRequest?,
     actionOrder: List<String>,
+    // True exactly once, for the tab that's visible right after a fresh app
+    // launch — overrides the saved-position restore below so TalkBack lands on
+    // the very first post instead of wherever the reader left off last time.
+    focusTopOnAppear: Boolean,
+    onTopFocusHandled: () -> Unit,
     onOpenLink: (String) -> Unit,
     onLoadOlder: () -> Unit,
     onNoteSelection: (String) -> Unit,
@@ -649,12 +674,31 @@ private fun StatusList(
     // Restore the position the core remembers, once, when this tab first fills.
     // Afterwards the core's position follows what we report, so re-applying it on
     // every timeline update would snap the list under the reader on each refresh.
+    // A fresh app launch overrides this: land on the very top instead, so TalkBack
+    // starts the reader at post 1 rather than silently resuming mid-timeline.
     var restored by remember(timelineKey) { mutableStateOf(false) }
-    LaunchedEffect(timelineKey, rows) {
+    LaunchedEffect(timelineKey, rows, focusTopOnAppear) {
         if (restored || rows.isEmpty()) return@LaunchedEffect
         restored = true
-        val idx = rows.indexOfFirst { it.id == selectedId }
-        if (idx > 0) listState.scrollToItem(idx)
+        if (focusTopOnAppear) {
+            listState.scrollToItem(0)
+        } else {
+            val idx = rows.indexOfFirst { it.id == selectedId }
+            if (idx > 0) listState.scrollToItem(idx)
+        }
+    }
+
+    // Once item 0 is actually laid out (LazyColumn only composes visible items,
+    // so the FocusRequester below isn't attached until then), claim TalkBack's
+    // accessibility focus for it — this is the one-shot override above landing.
+    val topFocusRequester = remember(timelineKey) { FocusRequester() }
+    LaunchedEffect(focusTopOnAppear, rows.isNotEmpty(), isCurrent) {
+        if (!focusTopOnAppear || rows.isEmpty() || !isCurrent) return@LaunchedEffect
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.index == 0 } }
+            .filter { it }
+            .first()
+        runCatching { topFocusRequester.requestFocus() }
+        onTopFocusHandled()
     }
 
     // Move only when the core asks (a synced-position restore, Go Back, jump to a
@@ -681,10 +725,17 @@ private fun StatusList(
         }
     }
 
+    val firstRowId = rows.firstOrNull()?.id
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         items(rows, key = { it.id }) { row ->
+            val isFirst = row.id == firstRowId
             StatusRow(
                 row = row,
+                modifier = if (isFirst) {
+                    Modifier.focusRequester(topFocusRequester).focusable()
+                } else {
+                    Modifier
+                },
                 actionOrder = actionOrder,
                 onSelect = onNoteSelection,
                 onOpenLink = onOpenLink,
