@@ -61,6 +61,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -114,6 +115,12 @@ fun HomeScreen(
     // True exactly once per fresh HomeScreen composition (i.e. once per app
     // open, not on every tab switch or recomposition) — see StatusList.
     var pendingTopFocus by remember { mutableStateOf(true) }
+    // Re-tapping the active tab jumps its timeline to the top. Token increments
+    // on every re-tap so StatusList's LaunchedEffect fires each time even if
+    // the same tab is re-tapped repeatedly; jumpToTopTab records which page
+    // the request is for.
+    var jumpToTopTab by remember { mutableStateOf(-1) }
+    var jumpToTopToken by remember { mutableStateOf(0) }
     // The User Analysis picker (opened from the overflow menu).
     var showUserAnalysis by remember { mutableStateOf(false) }
     // Find in timeline (opened from the overflow menu).
@@ -142,7 +149,16 @@ fun HomeScreen(
         TimelineTabs(
             tabs = tabs,
             selectedIndex = pagerState.currentPage,
-            onSelect = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
+            onSelect = { index ->
+                if (index == pagerState.currentPage) {
+                    // Re-tapping the already-active tab: jump its timeline to
+                    // the top instead of doing nothing.
+                    jumpToTopTab = index
+                    jumpToTopToken++
+                } else {
+                    scope.launch { pagerState.animateScrollToPage(index) }
+                }
+            },
             onClose = viewModel::closeTimeline,
             onPin = viewModel::pinTimeline,
             onMute = viewModel::muteTimeline,
@@ -284,6 +300,7 @@ fun HomeScreen(
                 actionOrder = postActionOrder,
                 focusTopOnAppear = pendingTopFocus && pageIndex == pagerState.currentPage,
                 onTopFocusHandled = { pendingTopFocus = false },
+                jumpToTopSignal = if (pageIndex == jumpToTopTab) jumpToTopToken else 0,
                 onOpenLink = viewModel::openLink,
                 onLoadOlder = { viewModel.loadOlder(automatic = true) },
                 onNoteSelection = viewModel::noteSelection,
@@ -616,6 +633,9 @@ private fun StatusList(
     // the very first post instead of wherever the reader left off last time.
     focusTopOnAppear: Boolean,
     onTopFocusHandled: () -> Unit,
+    // Non-zero and changed = "jump to top now" (a re-tap of this tab). 0 = no
+    // pending request.
+    jumpToTopSignal: Int,
     onOpenLink: (String) -> Unit,
     onLoadOlder: () -> Unit,
     onNoteSelection: (String) -> Unit,
@@ -674,31 +694,48 @@ private fun StatusList(
     // Restore the position the core remembers, once, when this tab first fills.
     // Afterwards the core's position follows what we report, so re-applying it on
     // every timeline update would snap the list under the reader on each refresh.
-    // A fresh app launch overrides this: land on the very top instead, so TalkBack
-    // starts the reader at post 1 rather than silently resuming mid-timeline.
+    //
+    // A fresh app launch overrides this: land on the very top instead, so
+    // TalkBack starts the reader at post 1 rather than silently resuming
+    // mid-timeline. The initial sync can refill `rows` more than once (a quick
+    // cached fill, then the real fetch) — re-pin to the top on every refill
+    // while that's happening, and only hand control back to the normal restore
+    // logic once the list has gone quiet for a bit, so a later refill can't
+    // fall through to the old "resume where I left off" behaviour underneath it.
     var restored by remember(timelineKey) { mutableStateOf(false) }
-    LaunchedEffect(timelineKey, rows, focusTopOnAppear) {
-        if (restored || rows.isEmpty()) return@LaunchedEffect
-        restored = true
+    val topFocusRequester = remember(timelineKey) { FocusRequester() }
+    LaunchedEffect(timelineKey, rows, focusTopOnAppear, isCurrent) {
+        if (rows.isEmpty()) return@LaunchedEffect
         if (focusTopOnAppear) {
+            if (!isCurrent) return@LaunchedEffect
             listState.scrollToItem(0)
-        } else {
+            snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.index == 0 } }
+                .filter { it }
+                .first()
+            runCatching { topFocusRequester.requestFocus() }
+            // Debounce: if `rows` changes again before this finishes, Compose
+            // cancels and relaunches this whole block, so the handled-callback
+            // below only actually fires once the timeline stops refilling.
+            delay(750)
+            restored = true
+            onTopFocusHandled()
+        } else if (!restored) {
+            restored = true
             val idx = rows.indexOfFirst { it.id == selectedId }
             if (idx > 0) listState.scrollToItem(idx)
         }
     }
 
-    // Once item 0 is actually laid out (LazyColumn only composes visible items,
-    // so the FocusRequester below isn't attached until then), claim TalkBack's
-    // accessibility focus for it — this is the one-shot override above landing.
-    val topFocusRequester = remember(timelineKey) { FocusRequester() }
-    LaunchedEffect(focusTopOnAppear, rows.isNotEmpty(), isCurrent) {
-        if (!focusTopOnAppear || rows.isEmpty() || !isCurrent) return@LaunchedEffect
+    // Re-tapping the already-active tab jumps that timeline to the top and
+    // moves TalkBack focus there — a direct, user-triggered escape hatch that
+    // doesn't depend on guessing when background loading has settled.
+    LaunchedEffect(jumpToTopSignal) {
+        if (jumpToTopSignal == 0 || rows.isEmpty()) return@LaunchedEffect
+        listState.scrollToItem(0)
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.index == 0 } }
             .filter { it }
             .first()
         runCatching { topFocusRequester.requestFocus() }
-        onTopFocusHandled()
     }
 
     // Move only when the core asks (a synced-position restore, Go Back, jump to a
