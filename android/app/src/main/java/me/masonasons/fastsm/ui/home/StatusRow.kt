@@ -47,6 +47,7 @@ private val DEFAULT_POST_ACTION_ORDER = listOf(
 @Composable
 fun StatusRow(
     row: RowUi,
+    modifier: Modifier = Modifier,
     actionOrder: List<String>,
     /** Acting on a row makes it the reading position (the core persists it). */
     onSelect: (String) -> Unit,
@@ -136,7 +137,7 @@ fun StatusRow(
         else -> ({ onOpenThread(row.id) })
     }
 
-    val base = Modifier
+    val base = modifier
         .combinedClickable(
             onClick = { onSelect(row.id); primaryOpen() },
             onLongClick = { onSelect(row.id); menuOpen = true },
