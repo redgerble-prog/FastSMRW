@@ -1042,7 +1042,25 @@ class CoreViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- Compose ----------------------------------------------------------
 
+    // Text handed in from Android's share sheet (see MainActivity), waiting to
+    // seed the next new-post compose screen. Purely a Kotlin-side handoff — the
+    // native core has no concept of this, it just decides what a blank compose
+    // screen looks like as usual. Plain var: it's only ever read once, during
+    // ComposeScreen's initial composition, so it doesn't need to be observable.
+    var pendingShareText: String? = null
+        private set
+
+    /** Consumes and clears the pending share text so it's only applied once. */
+    fun consumePendingShareText(): String? =
+        pendingShareText.also { pendingShareText = null }
+
     fun composeNew() = core.dispatch("compose_context") { put("mode", "new") }
+
+    /** Opens a new post prefilled with text shared in from another app. */
+    fun composeFromShare(text: String) {
+        pendingShareText = text
+        composeNew()
+    }
 
     fun composeReply(id: String) = core.dispatch("compose_context") {
         put("mode", "reply"); put("id", id)
