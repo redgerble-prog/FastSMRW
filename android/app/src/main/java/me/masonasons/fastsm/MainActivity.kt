@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleOAuthRedirect(intent)
+        handleShareIntent(intent)
         setContent {
             FastSmTheme {
                 Surface {
@@ -75,11 +76,19 @@ class MainActivity : ComponentActivity() {
         vm.pause()
     }
 
-    // singleTop: the fastsm://oauth redirect re-enters the live activity here.
+    // singleTop: the fastsm://oauth redirect, and share-sheet shares while the
+    // app is already running, both re-enter the live activity here.
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         handleOAuthRedirect(intent)
+        handleShareIntent(intent)
+    }
+
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND || intent.type != "text/plain") return
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() } ?: return
+        vm.composeFromShare(text)
     }
 
     private fun handleOAuthRedirect(intent: Intent?) {
@@ -212,5 +221,4 @@ private fun App(vm: CoreViewModel) {
             dismissButton = { TextButton(onClick = { vm.dismissUpdate() }) { Text("Later") } },
         )
     }
-}    
-        
+}
