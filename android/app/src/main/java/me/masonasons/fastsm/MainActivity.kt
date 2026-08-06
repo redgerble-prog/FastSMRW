@@ -143,6 +143,18 @@ private fun App(vm: CoreViewModel) {
             cm?.setPrimaryClip(ClipData.newPlainText("FastSM", text))
         }
     }
+    // A share-sheet share can arrive before the core has loaded any accounts
+    // (e.g. share received in onCreate, on a cold start). Opening compose that
+    // early is a no-op the core silently drops, so wait until there's actually
+    // an account to post from, then open it. lastHandledShareToken guards
+    // against re-opening compose on every later accounts update.
+    var lastHandledShareToken by remember { mutableStateOf(0) }
+    LaunchedEffect(vm.shareRequestToken, accounts.isNotEmpty()) {
+        if (accounts.isNotEmpty() && vm.shareRequestToken != lastHandledShareToken) {
+            lastHandledShareToken = vm.shareRequestToken
+            vm.composeNew()
+        }
+    }
 
     val ctx = composeContext
     val prof = profile
