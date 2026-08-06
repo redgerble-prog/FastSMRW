@@ -1,6 +1,10 @@
 package me.masonasons.fastsm.ui.settings
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -49,10 +54,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.masonasons.fastsm.core.FastSmCore
 import me.masonasons.fastsm.ui.CoreViewModel
+import me.masonasons.fastsm.util.BackupManager
 import org.json.JSONObject
 import kotlin.math.roundToInt
 
@@ -155,6 +165,7 @@ fun SettingsScreen(viewModel: CoreViewModel, onClose: () -> Unit) {
         panel == "behavior" -> "Behavior"
         panel == "post_actions" -> "Post actions"
         panel == "updates" -> "Updates"
+        panel == "backup" -> "Backup & Restore"
         else -> "Settings"
     }
 
@@ -191,6 +202,7 @@ fun SettingsScreen(viewModel: CoreViewModel, onClose: () -> Unit) {
                 panel == "behavior" -> BehaviorPanel(s, viewModel)
                 panel == "post_actions" -> PostActionsPanel(s, viewModel)
                 panel == "updates" -> UpdatesPanel(s, viewModel)
+                panel == "backup" -> BackupPanel()
                 else -> RootList { panel = it }
             }
         }
@@ -210,6 +222,7 @@ private fun RootList(onOpen: (String) -> Unit) {
         "behavior" to "Behavior",
         "post_actions" to "Post actions",
         "updates" to "Updates",
+        "backup" to "Backup & Restore",
     ).forEach { (key, label) ->
         Text(
             label,
@@ -362,6 +375,90 @@ private fun UpdatesPanel(s: JSONObject, vm: CoreViewModel) {
     HorizontalDivider()
     ActionRow("Check for updates now") { vm.checkForUpdate() }
     HelpText("You're running FastSMRW ${FastSmCore.version}. Updates download from GitHub; tap the downloaded APK to install.")
+}
+
+@Composable
+private fun BackupPanel() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf<String?>(null) }
+    var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
+
+    val backupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        status = "Backing up…"
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { BackupManager.backup(context, uri) }
+            status = result.fold(
+                onSuccess = { "Backup saved." },
+                onFailure = { "Backup failed: ${it.message}" },
+            )
+        }
+    }
+    val restoreLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) pendingRestoreUri = uri }
+
+    HelpText(
+        "Back up all your accounts, sign-in tokens, and settings to a file you " +
+            "choose, or restore from a previous backup. Restoring replaces " +
+            "everything currently on this device and restarts the app.",
+    )
+    ActionRow("Back up now") {
+        status = null
+        backupLauncher.launch("fastsmrw-backup-${System.currentTimeMillis()}.zip")
+    }
+    HorizontalDivider()
+    ActionRow("Restore from backup") {
+        status = null
+        restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+    }
+    status?.let { HelpText(it) }
+
+    pendingRestoreUri?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { pendingRestoreUri = null },
+            title = { Text("Restore backup?") },
+            text = {
+                Text(
+                    "This replaces every account and setting currently on this " +
+                        "device with what's in the backup, and restarts FastSMRW. " +
+                        "This can't be undone.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = uri
+                    pendingRestoreUri = null
+                    status = "Restoring…"
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            BackupManager.restore(context, target)
+                        }
+                        result.fold(
+                            onSuccess = { restartApp(context) },
+                            onFailure = { status = "Restore failed: ${it.message}" },
+                        )
+                    }
+                }) { Text("Restore") }
+            },
+            dismissButton = { TextButton(onClick = { pendingRestoreUri = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/**
+ * A restored backup needs the core to boot fresh against the new files rather
+ * than reconcile them with whatever it already has loaded in memory, so this
+ * relaunches the app in a brand-new process (not just a new Activity).
+ */
+private fun restartApp(context: android.content.Context) {
+    val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+    intent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+    if (intent != null) context.startActivity(intent)
+    Runtime.getRuntime().exit(0)
 }
 
 @Composable
