@@ -1,6 +1,11 @@
 package me.masonasons.fastsm.ui.settings
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,54 +13,174 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import me.masonasons.fastsm.core.FastSmCore
 import me.masonasons.fastsm.ui.CoreViewModel
+import me.masonasons.fastsm.util.BackupManager
+import org.json.JSONObject
+import kotlin.math.roundToInt
 
-/**
- * Per-account settings for the active account — currently its soundpack. Changes
- * take effect immediately (the core applies the active account's pack live).
- */
+private const val CACHE_MAX = 20000
+private const val FETCH_MIN = 1
+private const val FETCH_MAX = 10
+
+private val autoRefreshOptions = listOf(
+    0 to "Off", 30 to "Every 30 seconds", 60 to "Every minute",
+    120 to "Every 2 minutes", 300 to "Every 5 minutes",
+)
+private val cwOptions = listOf(
+    "hide" to "Hide post text (show warning only)",
+    "show" to "Show warning, then post text",
+    "ignore" to "Ignore warning (show post text)",
+)
+private val emojiOptions = listOf(
+    "none" to "Off", "unicode" to "Unicode emoji",
+    "mastodon" to "Custom (:shortcode:)", "both" to "Both",
+)
+private val tabBarPositionOptions = listOf(
+    "top" to "Top of the screen",
+    "bottom" to "Bottom of the screen",
+)
+
+// Labels for the post-action editor, keyed by post_action_catalog() key.
+private val postActionLabels = mapOf(
+    "play_media" to "View media", "links" to "Open links", "reply" to "Reply",
+    "boost" to "Boost", "favorite" to "Favorite", "bookmark" to "Bookmark",
+    "quote" to "Quote", "thread" to "View conversation", "post_info" to "Post info",
+    "copy" to "Copy", "user_profile" to "Author's profile",
+    "user_timeline" to "Author's posts", "followers" to "Followers",
+    "following" to "Following", "mute_conversation" to "Mute conversation",
+    "favorited_by" to "See who favorited", "reblogged_by" to "See who boosted",
+    "alias" to "Add or edit alias", "follow_hashtag" to "Follow hashtag",
+    "speak_user" to "Speak user info", "speak_reply" to "Speak referenced reply",
+    "jump_reply" to "Jump to referenced reply", "edit" to "Edit", "pin_post" to "Pin to profile",
+    "report" to "Report post", "browser" to "Open in browser",
+    "expand_links" to "Expand links (one action per link)", "delete" to "Delete",
+)
+
+private val statusFieldLabels = mapOf(
+    "boostedBy" to "Boosted by", "author" to "Author name", "handle" to "Handle (@user)",
+    "contentWarning" to "Content warning", "text" to "Post text", "quote" to "Quoted post",
+    "media" to "Media / attachments", "poll" to "Poll", "time" to "Time",
+    "stats" to "Reply / boost / favorite counts", "favorited" to "Favorited state",
+    "boosted" to "Boosted state", "visibility" to "Visibility", "source" to "Posting app / source",
+)
+private val userFieldLabels = mapOf(
+    "author" to "Display name", "handle" to "Handle (@user)", "bot" to "Bot indicator",
+    "locked" to "Locked indicator", "bio" to "Bio", "followers" to "Followers count",
+    "following" to "Following count", "posts" to "Posts count",
+)
+private val notificationFieldLabels = mapOf(
+    "actor" to "Who (name)", "action" to "What they did", "handle" to "Handle (@user)",
+    "text" to "Related post text", "time" to "Time",
+)
+
+private fun fieldLabel(list: String, field: String): String = when (list) {
+    "user", "copy_user" -> userFieldLabels
+    "notification", "copy_notification" -> notificationFieldLabels
+    else -> statusFieldLabels // status, autoread, copy_status
+}[field] ?: field
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AccountSettingsScreen(viewModel: CoreViewModel, onClose: () -> Unit) {
-    val settings by viewModel.accountSettings.collectAsStateWithLifecycle()
+fun SettingsScreen(viewModel: CoreViewModel, onClose: () -> Unit) {
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val soundpacks by viewModel.soundpacks.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) { viewModel.loadAccountSettings() }
-    BackHandler(enabled = true) { onClose() }
+    // Two-level navigation: root category list -> a panel -> (speech) a field editor.
+    var panel by remember { mutableStateOf<String?>(null) }
+    var speechList by remember { mutableStateOf<String?>(null) }
+
+    val goBack: () -> Unit = {
+        when {
+            speechList != null -> speechList = null
+            panel != null -> panel = null
+            else -> onClose()
+        }
+    }
+    BackHandler(enabled = true, onBack = goBack)
+
+    val s = settings
+    val title = when {
+        speechList == "status" -> "Posts"
+        speechList == "user" -> "Users"
+        speechList == "notification" -> "Notifications"
+        speechList == "autoread" -> "Auto-read"
+        speechList == "copy_status" -> "Copy: Posts"
+        speechList == "copy_user" -> "Copy: Users"
+        speechList == "copy_notification" -> "Copy: Notifications"
+        panel == "general" -> "General"
+        panel == "timelines" -> "Timelines"
+        panel == "audio" -> "Audio"
+        panel == "earcons" -> "Earcons"
+        panel == "speech" -> "Speech"
+        panel == "advanced" -> "Advanced"
+        panel == "confirmation" -> "Confirmation"
+        panel == "behavior" -> "Behavior"
+        panel == "post_actions" -> "Post actions"
+        panel == "updates" -> "Updates"
+        panel == "backup" -> "Backup & Restore"
+        else -> "Settings"
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(settings?.acct?.let { "Account: @$it" } ?: "Account settings") },
+                title = { Text(title) },
                 navigationIcon = {
-                    IconButton(onClick = onClose) {
+                    IconButton(onClick = goBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
             )
         },
     ) { pad ->
-        val s = settings
         if (s == null) {
             Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
@@ -65,31 +190,610 @@ fun AccountSettingsScreen(viewModel: CoreViewModel, onClose: () -> Unit) {
         Column(
             modifier = Modifier.fillMaxSize().padding(pad).verticalScroll(rememberScrollState()),
         ) {
-            Text(
-                "Soundpack",
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            )
-            s.soundpacks.forEach { pack ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .selectable(
-                            selected = pack == s.soundpack,
-                            role = Role.RadioButton,
-                            onClick = { viewModel.setAccountSoundpack(pack) },
-                        )
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioButton(selected = pack == s.soundpack, onClick = null)
-                    Text(
-                        pack,
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.padding(start = 8.dp),
-                    )
-                }
+            when {
+                speechList != null -> SpeechFieldEditor(s, speechList!!, viewModel)
+                panel == "general" -> GeneralPanel(s, viewModel)
+                panel == "timelines" -> TimelinesPanel(s, viewModel)
+                panel == "audio" -> AudioPanel(s, soundpacks, viewModel)
+                panel == "earcons" -> EarconsPanel(s, viewModel)
+                panel == "speech" -> SpeechPanel(s, viewModel) { speechList = it }
+                panel == "advanced" -> AdvancedPanel(s, viewModel)
+                panel == "confirmation" -> ConfirmationPanel(s, viewModel)
+                panel == "behavior" -> BehaviorPanel(s, viewModel)
+                panel == "post_actions" -> PostActionsPanel(s, viewModel)
+                panel == "updates" -> UpdatesPanel(s, viewModel)
+                panel == "backup" -> BackupPanel()
+                else -> RootList { panel = it }
             }
         }
     }
+}
+
+@Composable
+private fun RootList(onOpen: (String) -> Unit) {
+    listOf(
+        "general" to "General",
+        "timelines" to "Timelines",
+        "audio" to "Audio",
+        "earcons" to "Earcons",
+        "speech" to "Speech",
+        "advanced" to "Advanced",
+        "confirmation" to "Confirmation",
+        "behavior" to "Behavior",
+        "post_actions" to "Post actions",
+        "updates" to "Updates",
+        "backup" to "Backup & Restore",
+    ).forEach { (key, label) ->
+        Text(
+            label,
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpen(key) }
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+        )
+        HorizontalDivider()
+    }
+}
+
+@Composable
+private fun GeneralPanel(s: JSONObject, vm: CoreViewModel) {
+    SwitchRow("Return key sends the post", s.optBoolean("enter_to_send")) {
+        vm.updateSetting { put("enter_to_send", it) }
+    }
+    HelpText("With this on, Return sends the post and Shift+Return starts a new line. "
+        + "With it off, Return starts a new line and Ctrl+Return sends.")
+}
+
+@Composable
+private fun TimelinesPanel(s: JSONObject, vm: CoreViewModel) {
+    NumberField(
+        "Maximum posts to cache per timeline", s.optInt("cache_limit"), 0, CACHE_MAX,
+        "How many posts to keep saved per timeline for instant startup (0-20000, 0 turns " +
+            "caching off). This is storage, not how many load at once — see Advanced.",
+    ) { vm.updateSetting { put("cache_limit", it) } }
+    ComboRow("Auto-refresh", autoRefreshOptions, s.optInt("auto_refresh_seconds")) {
+        vm.updateSetting { put("auto_refresh_seconds", it) }
+    }
+    HelpText("Check timelines for new posts on this interval; new posts play that timeline's sound.")
+    SwitchRow("Stream in real time (Mastodon)", s.optBoolean("streaming_enabled")) {
+        vm.updateSetting { put("streaming_enabled", it) }
+    }
+    ComboRow("Tab bar position", tabBarPositionOptions,
+        s.optString("tab_bar_position").ifEmpty { "top" }) {
+        vm.updateSetting { put("tab_bar_position", it) }
+    }
+    HelpText("Show the timeline tabs at the top or the bottom of the screen.")
+    SwitchRow("Show mentions in the Notifications timeline", s.optBoolean("show_mentions_in_notifications")) {
+        vm.updateSetting { put("show_mentions_in_notifications", it) }
+    }
+    SwitchRow("Reverse timelines (newest at the bottom)", s.optBoolean("reverse_timelines")) {
+        vm.updateSetting { put("reverse_timelines", it) }
+    }
+    SwitchRow("Automatically load older posts when you reach the end", s.optBoolean("auto_load_older")) {
+        vm.updateSetting { put("auto_load_older", it) }
+    }
+    SwitchRow("Sync home position with the server (Mastodon)", s.optBoolean("sync_home_position")) {
+        vm.updateSetting { put("sync_home_position", it) }
+    }
+}
+
+@Composable
+private fun AudioPanel(s: JSONObject, soundpacks: List<String>, vm: CoreViewModel) {
+    SwitchRow("Play sounds", s.optBoolean("sounds_enabled")) {
+        vm.updateSetting { put("sounds_enabled", it) }
+    }
+    if (soundpacks.isNotEmpty()) {
+        ComboRow("Soundpack", soundpacks.map { it to it }, s.optString("soundpack")) {
+            vm.updateSetting { put("soundpack", it) }
+        }
+    }
+    HelpText("A Default pack is built in. Add your own pack to the soundpacks folder, then pick it here.")
+    SliderRow("Volume", s.optInt("sound_volume", 100)) {
+        vm.updateSetting { put("sound_volume", it) }
+    }
+    SwitchRow("Play a sound at the top or bottom of a timeline (in the window)", s.optBoolean("boundary_sound")) {
+        vm.updateSetting { put("boundary_sound", it) }
+    }
+}
+
+@Composable
+private fun EarconsPanel(s: JSONObject, vm: CoreViewModel) {
+    HelpText("A short sound plays as you move onto a post that has each of these. Turn off any you don't want.")
+    SwitchRow("Image (post has an image)", s.optBoolean("earcon_image", true)) {
+        vm.updateSetting { put("earcon_image", it) }
+    }
+    SwitchRow("Media (post has video, audio, or a GIF)", s.optBoolean("earcon_media", true)) {
+        vm.updateSetting { put("earcon_media", it) }
+    }
+    SwitchRow("Mention (post mentions you)", s.optBoolean("earcon_mention", true)) {
+        vm.updateSetting { put("earcon_mention", it) }
+    }
+    SwitchRow("Pinned (post is pinned to a profile)", s.optBoolean("earcon_pinned", true)) {
+        vm.updateSetting { put("earcon_pinned", it) }
+    }
+    SwitchRow("Poll (post has a poll)", s.optBoolean("earcon_poll", true)) {
+        vm.updateSetting { put("earcon_poll", it) }
+    }
+}
+
+@Composable
+private fun SpeechPanel(s: JSONObject, vm: CoreViewModel, onConfigure: (String) -> Unit) {
+    HelpText("Choose which details the screen reader speaks, and their order, for each kind of row:")
+    ActionRow("Configure Posts…") { onConfigure("status") }
+    ActionRow("Configure Users…") { onConfigure("user") }
+    ActionRow("Configure Notifications…") { onConfigure("notification") }
+    ActionRow("Configure Auto-read…") { onConfigure("autoread") }
+    ActionRow("Copy template — Posts…") { onConfigure("copy_status") }
+    ActionRow("Copy template — Users…") { onConfigure("copy_user") }
+    ActionRow("Copy template — Notifications…") { onConfigure("copy_notification") }
+    ComboRow("Content warnings", cwOptions, s.optString("cw_mode")) {
+        vm.updateSetting { put("cw_mode", it) }
+    }
+    ComboRow("Remove emoji from posts", emojiOptions, s.optString("post_emoji_removal")) {
+        vm.updateSetting { put("post_emoji_removal", it) }
+    }
+    ComboRow("Remove emoji from names", emojiOptions, s.optString("name_emoji_removal")) {
+        vm.updateSetting { put("name_emoji_removal", it) }
+    }
+    NumberField("Max usernames in a post (0 = all)", s.optInt("max_usernames_in_post"), 0, 999, null) {
+        vm.updateSetting { put("max_usernames_in_post", it) }
+    }
+    SwitchRow("Use absolute time (clock time), not relative", s.optBoolean("absolute_time")) {
+        vm.updateSetting { put("absolute_time", it) }
+    }
+    val separator = s.optJSONObject("speech")?.optString("separator") ?: ", "
+    TextRow("Separator spoken between items", separator) { v ->
+        vm.updateSetting {
+            optJSONObject("speech")?.put("separator", v)
+        }
+    }
+}
+
+@Composable
+private fun AdvancedPanel(s: JSONObject, vm: CoreViewModel) {
+    NumberField(
+        "API calls per timeline load (1-10)", s.optInt("fetch_pages", 3), FETCH_MIN, FETCH_MAX,
+        "Posts loaded per refresh is about 40 × this number. Raise it to load more at once " +
+            "(slower). Applies to refresh and scrollback.",
+    ) { vm.updateSetting { put("fetch_pages", it) } }
+}
+
+@Composable
+private fun BehaviorPanel(s: JSONObject, vm: CoreViewModel) {
+    SwitchRow("Put extra reply mentions at the end", s.optBoolean("reply_mentions_at_end")) {
+        vm.updateSetting { put("reply_mentions_at_end", it) }
+    }
+    HelpText("In a reply, mention the person you're replying to up front and move the other mentioned users to the end of the post.")
+}
+
+@Composable
+private fun UpdatesPanel(s: JSONObject, vm: CoreViewModel) {
+    SwitchRow("Check for updates when FastSMRW starts", s.optBoolean("check_updates_on_startup", true)) {
+        vm.updateSetting { put("check_updates_on_startup", it) }
+    }
+    HorizontalDivider()
+    ActionRow("Check for updates now") { vm.checkForUpdate() }
+    HelpText("You're running FastSMRW ${FastSmCore.version}. Updates download from GitHub; tap the downloaded APK to install.")
+}
+
+@Composable
+private fun BackupPanel() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf<String?>(null) }
+    var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
+
+    val backupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        status = "Backing up…"
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { BackupManager.backup(context, uri) }
+            status = result.fold(
+                onSuccess = { "Backup saved." },
+                onFailure = { "Backup failed: ${it.message}" },
+            )
+        }
+    }
+    val restoreLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) pendingRestoreUri = uri }
+
+    HelpText(
+        "Back up all your accounts, sign-in tokens, and settings to a file you " +
+            "choose, or restore from a previous backup. Restoring replaces " +
+            "everything currently on this device and restarts the app.",
+    )
+    ActionRow("Back up now") {
+        status = null
+        backupLauncher.launch("fastsmrw-backup-${System.currentTimeMillis()}.zip")
+    }
+    HorizontalDivider()
+    ActionRow("Restore from backup") {
+        status = null
+        restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+    }
+    status?.let { HelpText(it) }
+
+    pendingRestoreUri?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { pendingRestoreUri = null },
+            title = { Text("Restore backup?") },
+            text = {
+                Text(
+                    "This replaces every account and setting currently on this " +
+                        "device with what's in the backup, and restarts FastSMRW. " +
+                        "This can't be undone.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = uri
+                    pendingRestoreUri = null
+                    status = "Restoring…"
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            BackupManager.restore(context, target)
+                        }
+                        result.fold(
+                            onSuccess = { restartApp(context) },
+                            onFailure = { status = "Restore failed: ${it.message}" },
+                        )
+                    }
+                }) { Text("Restore") }
+            },
+            dismissButton = { TextButton(onClick = { pendingRestoreUri = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/**
+ * A restored backup needs the core to boot fresh against the new files rather
+ * than reconcile them with whatever it already has loaded in memory, so this
+ * relaunches the app in a brand-new process (not just a new Activity).
+ */
+private fun restartApp(context: android.content.Context) {
+    val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+    intent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+    if (intent != null) context.startActivity(intent)
+    Runtime.getRuntime().exit(0)
+}
+
+@Composable
+private fun ConfirmationPanel(s: JSONObject, vm: CoreViewModel) {
+    HelpText("Show a confirmation before:")
+    listOf(
+        "confirm_boost" to "Boosting",
+        "confirm_unboost" to "Unboosting",
+        "confirm_favorite" to "Favoriting",
+        "confirm_unfavorite" to "Unfavoriting",
+        "confirm_clear_timeline" to "Clearing a timeline",
+        "confirm_block" to "Blocking a user",
+        "confirm_unblock" to "Unblocking a user",
+        "confirm_delete_post" to "Deleting a post",
+    ).forEach { (key, label) ->
+        SwitchRow(label, s.optBoolean(key)) { vm.updateSetting { put(key, it) } }
+    }
+}
+
+@Composable
+private fun PostActionsPanel(s: JSONObject, vm: CoreViewModel) {
+    val arr = s.optJSONArray("post_actions") ?: return
+    val n = arr.length()
+    HelpText("These are the actions TalkBack offers on a post (swipe up or down to reach them). Double-tap to show or hide an action; use its actions to move it up or down.")
+    for (i in 0 until n) {
+        val o = arr.getJSONObject(i)
+        val action = o.optString("action")
+        val enabled = o.optBoolean("enabled", true)
+        val label = postActionLabels[action] ?: action
+        // key(action) keeps this row's node identity stable across reordering so
+        // TalkBack focus follows the moved item (matches the speech editor).
+        key(action) {
+            val actions = buildList {
+                add(CustomAccessibilityAction(if (enabled) "Hide this action" else "Show this action") {
+                    vm.togglePostAction(i, !enabled); true
+                })
+                if (i > 0) add(CustomAccessibilityAction("Move up") { vm.movePostAction(i, -1); true })
+                if (i < n - 1) add(CustomAccessibilityAction("Move down") { vm.movePostAction(i, +1); true })
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clearAndSetSemantics {
+                        contentDescription =
+                            "$label, ${if (enabled) "shown" else "hidden"}, position ${i + 1} of $n"
+                        customActions = actions
+                        onClick { vm.togglePostAction(i, !enabled); true }
+                    }
+                    .padding(start = 16.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Switch(checked = enabled, onCheckedChange = { vm.togglePostAction(i, it) })
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.weight(1f).padding(start = 8.dp),
+                )
+                IconButton(onClick = { vm.movePostAction(i, -1) }, enabled = i > 0) {
+                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = null)
+                }
+                IconButton(onClick = { vm.movePostAction(i, +1) }, enabled = i < n - 1) {
+                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null)
+                }
+            }
+            HorizontalDivider()
+        }
+    }
+}
+
+@Composable
+private fun SpeechFieldEditor(s: JSONObject, list: String, vm: CoreViewModel) {
+    val arr = s.optJSONObject("speech")?.optJSONArray(list) ?: return
+    val n = arr.length()
+    // A field currently being edited for its before/after wrap text (dialog open).
+    var editing by remember { mutableStateOf<String?>(null) }
+
+    HelpText("Double-tap to toggle whether a detail is spoken; use the item's actions to move it up or down or set extra spoken text.")
+    for (i in 0 until n) {
+        val o = arr.getJSONObject(i)
+        val field = o.optString("field")
+        val enabled = o.optBoolean("enabled")
+
+        // key(field) keeps this row's semantics node identity stable across
+        // reordering, so TalkBack focus follows the moved item to its new spot
+        // instead of staying on whatever shifts into the old position.
+        key(field) {
+            // One TalkBack node: double-tap toggles spoken/muted; Move up/down and
+            // Edit extra text are custom actions. The visible switch and arrows stay
+            // for touch but are hidden from TalkBack by clearAndSetSemantics.
+            val actions = buildList {
+                add(CustomAccessibilityAction(if (enabled) "Do not speak this" else "Speak this") {
+                    vm.toggleSpeechField(list, field, !enabled); true
+                })
+                if (i > 0) add(CustomAccessibilityAction("Move up") { vm.moveSpeechField(list, i, -1); true })
+                if (i < n - 1) add(CustomAccessibilityAction("Move down") { vm.moveSpeechField(list, i, +1); true })
+                add(CustomAccessibilityAction("Edit extra spoken text") { editing = field; true })
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clearAndSetSemantics {
+                        contentDescription =
+                            "${fieldLabel(list, field)}, ${if (enabled) "spoken" else "not spoken"}, " +
+                                "position ${i + 1} of $n"
+                        customActions = actions
+                        onClick { vm.toggleSpeechField(list, field, !enabled); true }
+                    }
+                    .padding(start = 16.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = { vm.toggleSpeechField(list, field, it) },
+                )
+                Text(
+                    fieldLabel(list, field),
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.weight(1f).padding(start = 8.dp),
+                )
+                IconButton(onClick = { vm.moveSpeechField(list, i, -1) }, enabled = i > 0) {
+                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = null)
+                }
+                IconButton(onClick = { vm.moveSpeechField(list, i, +1) }, enabled = i < n - 1) {
+                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null)
+                }
+            }
+            HorizontalDivider()
+        }
+    }
+
+    editing?.let { field ->
+        val o = (0 until arr.length())
+            .map { arr.getJSONObject(it) }
+            .firstOrNull { it.optString("field") == field }
+        WrapDialog(
+            fieldLabel = fieldLabel(list, field),
+            before = o?.optString("before") ?: "",
+            after = o?.optString("after") ?: "",
+            noSeparatorAfter = o?.optBoolean("no_separator_after") ?: false,
+            onSave = { b, a, noSep ->
+                vm.setSpeechWrap(list, field, b, a, noSep); editing = null
+            },
+            onDismiss = { editing = null },
+        )
+    }
+}
+
+@Composable
+private fun WrapDialog(
+    fieldLabel: String,
+    before: String,
+    after: String,
+    noSeparatorAfter: Boolean,
+    onSave: (String, String, Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var b by remember { mutableStateOf(before) }
+    var a by remember { mutableStateOf(after) }
+    var noSep by remember { mutableStateOf(noSeparatorAfter) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Extra spoken text: $fieldLabel") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = b,
+                    onValueChange = { b = it },
+                    label = { Text("Speak before") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = a,
+                    onValueChange = { a = it },
+                    label = { Text("Speak after") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .toggleable(
+                            value = noSep,
+                            role = Role.Switch,
+                            onValueChange = { noSep = it },
+                        )
+                        .padding(top = 8.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "No separator after this field",
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(checked = noSep, onCheckedChange = null)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(b, a, noSep) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+// --- Shared rows ----------------------------------------------------------
+
+@Composable
+private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = null)
+    }
+}
+
+@Composable
+private fun ActionRow(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+    )
+}
+
+@Composable
+private fun <T> ComboRow(
+    label: String,
+    options: List<Pair<T, String>>,
+    selected: T,
+    onSelect: (T) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val current = options.firstOrNull { it.first == selected }?.second ?: ""
+    Box {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { open = true }
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.labelLarge)
+                Text(
+                    current,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEach { (value, optLabel) ->
+                DropdownMenuItem(
+                    text = { Text(optLabel) },
+                    onClick = { onSelect(value); open = false },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NumberField(
+    label: String,
+    value: Int,
+    min: Int,
+    max: Int,
+    help: String?,
+    onCommit: (Int) -> Unit,
+) {
+    var text by remember(value) { mutableStateOf(value.toString()) }
+    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it.filter { c -> c.isDigit() } },
+            label = { Text(label) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged {
+                    if (!it.isFocused) {
+                        val v = (text.toIntOrNull() ?: value).coerceIn(min, max)
+                        if (v != value) onCommit(v)
+                        text = v.toString()
+                    }
+                },
+        )
+        help?.let { HelpText(it) }
+    }
+}
+
+@Composable
+private fun TextRow(label: String, value: String, onCommit: (String) -> Unit) {
+    var text by remember(value) { mutableStateOf(value) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it },
+        label = { Text(label) },
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .onFocusChanged { if (!it.isFocused && text != value) onCommit(text) },
+    )
+}
+
+@Composable
+private fun SliderRow(label: String, value: Int, onChange: (Int) -> Unit) {
+    var pos by remember(value) { mutableFloatStateOf(value.toFloat()) }
+    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Text("$label: ${pos.roundToInt()}", style = MaterialTheme.typography.bodyLarge)
+        Slider(
+            value = pos,
+            onValueChange = { pos = it },
+            onValueChangeFinished = { onChange(pos.roundToInt()) },
+            valueRange = 0f..100f,
+        )
+    }
+}
+
+@Composable
+private fun HelpText(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+    )
 }
