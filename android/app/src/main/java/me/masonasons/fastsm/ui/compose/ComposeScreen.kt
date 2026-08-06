@@ -113,7 +113,11 @@ fun ComposeScreen(
     onDone: () -> Unit,
 ) {
     var field by remember {
-        mutableStateOf(TextFieldValue(ctx.prefillText, TextRange(ctx.prefillText.length)))
+        // A share-sheet share (only meaningful for a brand-new post) wins over
+        // the core's own prefill, which is blank for "new" anyway.
+        val initial = viewModel.consumePendingShareText().takeIf { ctx.replyToId == null && ctx.editId == null }
+            ?: ctx.prefillText
+        mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
     }
     var cw by remember { mutableStateOf(ctx.prefillCw) }
     // @-mention picker: open flag, the seed query, and the [start, caret) span of
