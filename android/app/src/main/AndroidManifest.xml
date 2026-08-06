@@ -25,6 +25,13 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="fastsm" android:host="oauth" />
             </intent-filter>
+            <!-- Share sheet target: "Share" a link/text from another app into a
+                 new post. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
     </application>
 </manifest>
