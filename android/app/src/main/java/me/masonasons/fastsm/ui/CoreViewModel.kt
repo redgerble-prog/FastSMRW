@@ -1,6 +1,9 @@
 package me.masonasons.fastsm.ui
 
 import android.app.Application
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -1050,17 +1053,26 @@ class CoreViewModel(app: Application) : AndroidViewModel(app) {
     var pendingShareText: String? = null
         private set
 
-    /** Consumes and clears the pending share text so it's only applied once. */
-    fun consumePendingShareText(): String? =
-        pendingShareText.also { pendingShareText = null }
+    // Bumped on every incoming share. Observable, unlike pendingShareText above,
+    // because App() needs to react to it: a share can arrive in onCreate before
+    // the core has loaded any accounts, and dispatching "compose_context" that
+    // early is silently ignored by the core (no account to post from yet) — so
+    // App() waits for accounts to be non-empty before actually opening compose,
+    // using this token to know a share is still pending and hasn't been acted on.
+    var shareRequestToken: Int = 0
+        private set
 
     fun composeNew() = core.dispatch("compose_context") { put("mode", "new") }
 
     /** Opens a new post prefilled with text shared in from another app. */
     fun composeFromShare(text: String) {
         pendingShareText = text
-        composeNew()
+        shareRequestToken++
     }
+
+    /** Consumes and clears the pending share text so it's only applied once. */
+    fun consumePendingShareText(): String? =
+        pendingShareText.also { pendingShareText = null }
 
     fun composeReply(id: String) = core.dispatch("compose_context") {
         put("mode", "reply"); put("id", id)
